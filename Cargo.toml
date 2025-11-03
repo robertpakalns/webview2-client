@@ -1,0 +1,21 @@
+[package]
+name = "webview2-client"
+version = "0.1.0"
+edition = "2024"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+debug-assertions = true
+strip = "symbols"
+
+[dependencies]
+windows = { version = "0.61.*", features = [ "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"], default-features = false }
+webview2-com = { version= "0.38.0", default-features = false }
+
+[build-dependencies]
+embed-resource = "3.0.6"
