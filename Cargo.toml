@@ -7,11 +7,13 @@ edition = "2024"
 incremental = true
 
 [profile.release]
+panic = "abort"
 codegen-units = 1
 lto = true
-opt-level = 3
-debug-assertions = true
+opt-level = "s"
 strip = "symbols"
+debug = false
+debug-assertions = false
 
 [dependencies]
 windows = { version = "0.61.*", features = [ "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"], default-features = false }

@@ -1,8 +1,26 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-use webview2_com::{Microsoft::Web::WebView2::Win32::*, *};
+use webview2_com::{
+    CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
+    CreateCoreWebView2EnvironmentCompletedHandler,
+    Microsoft::Web::WebView2::Win32::{
+        CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
+        ICoreWebView2EnvironmentOptions,
+    },
+    WebMessageReceivedEventHandler,
+};
 use windows::{
-    Win32::{Foundation::*, System::LibraryLoader::*, UI::WindowsAndMessaging::*},
-    core::*,
+    Win32::{
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC,
+            GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, MSG, PostQuitMessage,
+            RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SetWindowLongPtrW, TranslateMessage,
+            WINDOW_EX_STYLE, WM_DESTROY, WM_NCCREATE, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+            WS_VISIBLE,
+        },
+    },
+    core::{HSTRING, PCWSTR, PWSTR, w},
 };
 
 pub fn create_window() -> HWND {
@@ -11,7 +29,7 @@ pub fn create_window() -> HWND {
 
         let class_name = w!("webview2_client");
         let wc = WNDCLASSW {
-            style: CS_HREDRAW | CS_VREDRAW,
+            style: Default::default(),
             lpfnWndProc: Some(wnd_proc_setup),
             cbClsExtra: 0,
             cbWndExtra: 0,
@@ -49,7 +67,7 @@ pub fn create_window() -> HWND {
     }
 }
 
-pub fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller4, ICoreWebView2_22) {
+pub fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
     unsafe {
         let options = CoreWebView2EnvironmentOptions::default();
         options.set_additional_browser_arguments("--disable-frame-rate-limit".to_string());
@@ -57,17 +75,17 @@ pub fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller4, ICoreWebView2_2
         let (tx, rx) = std::sync::mpsc::channel();
 
         CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
-            Box::new(move |environment_created_handler| {
+            Box::new(move |handler| {
                 CreateCoreWebView2EnvironmentWithOptions(
                     PCWSTR::null(),
                     PCWSTR::null(),
                     &ICoreWebView2EnvironmentOptions::from(options),
-                    &environment_created_handler,
+                    &handler,
                 )
                 .map_err(webview2_com::Error::WindowsError)
             }),
-            Box::new(move |error_code, env| {
-                error_code?;
+            Box::new(move |err, env| {
+                err?;
 
                 CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
                     Box::new(move |controller_created_handler| {
@@ -93,16 +111,8 @@ pub fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller4, ICoreWebView2_2
         )
         .expect("Failed to create WebView2 env");
 
-        let controller = rx
-            .recv()
-            .unwrap()
-            .cast::<ICoreWebView2Controller4>()
-            .unwrap();
-        let webview2 = controller
-            .CoreWebView2()
-            .unwrap()
-            .cast::<ICoreWebView2_22>()
-            .unwrap();
+        let controller = rx.recv().unwrap();
+        let webview2 = controller.CoreWebView2().unwrap();
 
         (controller, webview2)
     }
@@ -132,7 +142,7 @@ unsafe extern "system" fn wnd_proc_main(
     match msg {
         WM_SIZE => {
             unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ICoreWebView2Controller4;
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ICoreWebView2Controller;
                 if !ptr.is_null() {
                     let mut rect = RECT::default();
                     GetClientRect(hwnd, &mut rect).ok();
