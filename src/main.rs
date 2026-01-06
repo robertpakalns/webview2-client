@@ -11,7 +11,6 @@ use webview2_com::{
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
-        System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC,
             GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, MSG, PostQuitMessage,
@@ -23,9 +22,9 @@ use windows::{
     core::{HSTRING, PCWSTR, PWSTR, w},
 };
 
-pub fn create_window() -> HWND {
+fn create_window() -> HWND {
     unsafe {
-        let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+        let hinstance = HINSTANCE::default();
 
         let class_name = w!("webview2_client");
         let wc = WNDCLASSW {
@@ -67,7 +66,7 @@ pub fn create_window() -> HWND {
     }
 }
 
-pub fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
+fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
     unsafe {
         let options = CoreWebView2EnvironmentOptions::default();
         options.set_additional_browser_arguments("--disable-frame-rate-limit".to_string());
@@ -118,12 +117,7 @@ pub fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
     }
 }
 
-unsafe extern "system" fn wnd_proc_setup(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+extern "system" fn wnd_proc_setup(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wnd_proc_main as isize);
@@ -133,12 +127,7 @@ unsafe extern "system" fn wnd_proc_setup(
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-unsafe extern "system" fn wnd_proc_main(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+extern "system" fn wnd_proc_main(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
             unsafe {
