@@ -11,3 +11,10 @@ document.addEventListener(
   },
   { once: true },
 );
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "F11") return;
+
+  e.preventDefault();
+  window.chrome.webview.postMessage("toggle_fullscreen");
+});

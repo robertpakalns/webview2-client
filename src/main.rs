@@ -12,15 +12,23 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC,
-            GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, MSG, PostQuitMessage,
-            RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SetWindowLongPtrW, TranslateMessage,
-            WINDOW_EX_STYLE, WM_DESTROY, WM_NCCREATE, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
-            WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GWL_STYLE, GWLP_USERDATA,
+            GWLP_WNDPROC, GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+            GetWindowLongW, GetWindowRect, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN,
+            SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW,
+            SetWindowLongW, SetWindowPos, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY,
+            WM_KEYDOWN, WM_NCCREATE, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     },
     core::{HSTRING, PCWSTR, PWSTR, w},
 };
+
+struct WindowState {
+    controller: ICoreWebView2Controller,
+    fullscreen: bool,
+    prev_rect: RECT,
+    prev_style: i32,
+}
 
 fn create_window() -> HWND {
     unsafe {
@@ -127,24 +135,87 @@ extern "system" fn wnd_proc_setup(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
+const F11: u32 = 0x7A; // VK_F11
 extern "system" fn wnd_proc_main(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_SIZE => {
-            unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ICoreWebView2Controller;
-                if !ptr.is_null() {
+    unsafe {
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
+        let state = if !ptr.is_null() {
+            Some(&mut *ptr)
+        } else {
+            None
+        };
+
+        match msg {
+            WM_SIZE => {
+                if let Some(state) = state {
                     let mut rect = RECT::default();
                     GetClientRect(hwnd, &mut rect).ok();
-                    (*ptr).SetBounds(rect).ok();
+                    state.controller.SetBounds(rect).ok();
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                if wparam.0 as u32 == F11 {
+                    if let Some(state) = state {
+                        toggle_fullscreen(hwnd, state);
+                    }
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
             }
-            LRESULT(0)
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-        WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
-            LRESULT(0)
-        }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+fn toggle_fullscreen(hwnd: HWND, state: &mut WindowState) {
+    if !state.fullscreen {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut rect).ok() };
+        state.prev_rect = rect;
+        state.prev_style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+
+        // Remove window borders & title
+        unsafe { SetWindowLongW(hwnd, GWL_STYLE, WS_VISIBLE.0 as i32) };
+
+        // Maximize to full screen
+        let screen_width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let screen_height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND::default()),
+                0,
+                0,
+                screen_width,
+                screen_height,
+                SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            )
+            .unwrap()
+        };
+
+        state.fullscreen = true;
+    } else {
+        unsafe {
+            SetWindowLongW(hwnd, GWL_STYLE, state.prev_style);
+            SetWindowPos(
+                hwnd,
+                Some(HWND::default()),
+                state.prev_rect.left,
+                state.prev_rect.top,
+                state.prev_rect.right - state.prev_rect.left,
+                state.prev_rect.bottom - state.prev_rect.top,
+                SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            )
+            .unwrap();
+        };
+
+        state.fullscreen = false;
     }
 }
 
@@ -153,7 +224,13 @@ fn main() {
         let hwnd = create_window();
         let (controller, webview) = create_webview2(hwnd);
 
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &controller as *const _ as isize);
+        let state = Box::new(WindowState {
+            controller,
+            fullscreen: false,
+            prev_rect: RECT::default(),
+            prev_style: 0,
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
 
         let script = HSTRING::from(include_str!("script.js"));
         webview
@@ -169,6 +246,13 @@ fn main() {
                     args.unwrap().TryGetWebMessageAsString(&mut msg).ok();
                     if msg.to_string()?.trim_matches('"') == "close" {
                         PostQuitMessage(0);
+                    }
+                    if msg.to_string()?.trim_matches('"') == "toggle_fullscreen" {
+                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
+                        if !ptr.is_null() {
+                            let state = &mut *ptr;
+                            toggle_fullscreen(hwnd, state);
+                        }
                     }
                     Ok(())
                 })),
