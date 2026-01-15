@@ -3,14 +3,19 @@ use webview2_com::{
     CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler,
     Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT, ICoreWebView2Environment,
+        ICoreWebView2WebResourceRequestedEventArgs,
+    },
+    Microsoft::Web::WebView2::Win32::{
         CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
         ICoreWebView2EnvironmentOptions,
     },
-    WebMessageReceivedEventHandler,
+    WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
 };
 use windows::{
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        System::Com::{IStream, StructuredStorage::CreateStreamOnHGlobal},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GWL_STYLE, GWLP_USERDATA,
             GWLP_WNDPROC, GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
@@ -22,6 +27,22 @@ use windows::{
     },
     core::{HSTRING, PCWSTR, PWSTR, w},
 };
+
+fn blocked_stream(msg: &str) -> IStream {
+    unsafe {
+        let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true).unwrap();
+        let bytes = msg.as_bytes();
+        let mut written = 0;
+        stream
+            .Write(
+                bytes.as_ptr() as *const _,
+                bytes.len() as u32,
+                Some(&mut written),
+            )
+            .unwrap();
+        stream
+    }
+}
 
 struct WindowState {
     controller: ICoreWebView2Controller,
@@ -74,12 +95,19 @@ fn create_window() -> HWND {
     }
 }
 
-fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
+fn create_webview2(
+    hwnd: HWND,
+) -> (
+    ICoreWebView2Controller,
+    ICoreWebView2,
+    ICoreWebView2Environment,
+) {
     unsafe {
         let options = CoreWebView2EnvironmentOptions::default();
         options.set_additional_browser_arguments("--disable-frame-rate-limit".to_string());
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx_controller, rx_controller) = std::sync::mpsc::channel();
+        let (tx_env, rx_env) = std::sync::mpsc::channel();
 
         CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
             Box::new(move |handler| {
@@ -93,11 +121,13 @@ fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
             }),
             Box::new(move |err, env| {
                 err?;
+                let env = env.unwrap();
+
+                tx_env.send(env.clone()).unwrap();
 
                 CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
                     Box::new(move |controller_created_handler| {
-                        env.unwrap()
-                            .CreateCoreWebView2Controller(hwnd, &controller_created_handler)
+                        env.CreateCoreWebView2Controller(hwnd, &controller_created_handler)
                             .map_err(webview2_com::Error::WindowsError)
                     }),
                     Box::new(move |err, controller| {
@@ -108,7 +138,7 @@ fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
                         GetClientRect(hwnd, &mut rect).ok();
                         controller.SetBounds(rect).ok();
 
-                        tx.send(controller).expect("error sending controller");
+                        tx_controller.send(controller).unwrap();
                         Ok(())
                     }),
                 )
@@ -118,10 +148,11 @@ fn create_webview2(hwnd: HWND) -> (ICoreWebView2Controller, ICoreWebView2) {
         )
         .expect("Failed to create WebView2 env");
 
-        let controller = rx.recv().unwrap();
+        let controller = rx_controller.recv().unwrap();
+        let env = rx_env.recv().unwrap();
         let webview2 = controller.CoreWebView2().unwrap();
 
-        (controller, webview2)
+        (controller, webview2, env)
     }
 }
 
@@ -222,7 +253,14 @@ fn toggle_fullscreen(hwnd: HWND, state: &mut WindowState) {
 fn main() {
     unsafe {
         let hwnd = create_window();
-        let (controller, webview) = create_webview2(hwnd);
+        let (controller, webview, env) = create_webview2(hwnd);
+
+        let blocked_domains = vec![
+            "api.adinplay.com",
+            "www.google-analytics.com",
+            "www.googletagmanager.com",
+            "static.cloudflareinsights.com",
+        ];
 
         let state = Box::new(WindowState {
             controller,
@@ -231,6 +269,10 @@ fn main() {
             prev_style: 0,
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+
+        webview
+            .AddWebResourceRequestedFilter(PCWSTR::null(), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT)
+            .unwrap();
 
         let script = HSTRING::from(include_str!("script.js"));
         webview
@@ -259,6 +301,37 @@ fn main() {
                 std::ptr::null_mut(),
             )
             .ok();
+
+        webview
+            .add_WebResourceRequested(
+                &WebResourceRequestedEventHandler::create(Box::new(
+                    move |_, args: Option<ICoreWebView2WebResourceRequestedEventArgs>| {
+                        let args = args.unwrap();
+                        let request = args.Request().unwrap();
+
+                        let mut uri_pwstr = PWSTR::null();
+                        request.Uri(&mut uri_pwstr).map_err(|e| e)?;
+                        let uri = uri_pwstr.to_string()?;
+
+                        if blocked_domains.iter().any(|domain| uri.contains(domain)) {
+                            let stream = blocked_stream("Blocked by client");
+                            let response = env
+                                .CreateWebResourceResponse(
+                                    Some(&stream),
+                                    403,
+                                    w!("Forbidden"),
+                                    w!("Content-Type: text/plain"),
+                                )
+                                .unwrap();
+                            args.SetResponse(&response).unwrap();
+                        }
+
+                        Ok(())
+                    },
+                )),
+                std::ptr::null_mut(),
+            )
+            .unwrap();
 
         let mut msg: MSG = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
